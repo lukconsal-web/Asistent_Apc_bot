@@ -59,7 +59,7 @@ async def handle_message(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         response = await ai_client.aio.models.generate_content(
-            mmodel="gemini-3.6-flash",
+            model="gemini-3.6-flash",
             contents=message.text,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
