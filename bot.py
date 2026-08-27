@@ -3,14 +3,12 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.enums import ParseMode
 from google import genai
 from google.genai import types as genai_types
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Чтение ключей из переменных окружения (на Railway они подставятся автоматически)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -20,18 +18,17 @@ if not BOT_TOKEN or not GEMINI_API_KEY:
 # Инициализация клиента Gemini
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Системная инструкция для точных ответов по Молдове
 SYSTEM_PROMPT = """
 Ты — экспертный юридический помощник по управлению жильем и кондоминиумами в Республике Молдова.
-Твоя база — Закон РМ о кондоминиуме № 187/2022 (со всеми актуальными изменениями, включая LP63/2025 и последующие поправки), а также правила взаимодействия с ASP (Агентством госуслуг), Cadastru (IP Cadastrul Bunurilor Imobile), Primăria и Гражданским кодексом РМ.
+Твоя база — Закон РМ о кондоминиуме № 187/2022 (со всеми актуальными изменениями), а также правила взаимодействия с ASP (Агентством госуслуг), Cadastru (IP Cadastrul Bunurilor Imobile), Primăria и Гражданским кодексом РМ.
 
 Правила формирования ответов:
 1. Отвечай строго на том языке, на котором спросил пользователь (русский или румынский).
 2. Форматируй каждый ответ СТРОГО по блокам:
-   - 💡 **Суть простыми словами:** (коротко, без сложного канцелярита, 1-3 предложения).
-   - 🏢 **Жизненный пример:** (конкретная ситуация из жизни многоквартирного дома).
-   - 🏛 **Куда обращаться (если требуется действие):** (пошаговый алгоритм: Собрание жильцов / ASP / Cadastru / Primăria / Поставщики услуг / Суд).
-   - ⚖️ **Основание в законе:** точные ссылки на статьи и части (например: ст. 22 ч. (3), ст. 48, ст. 88 Закона № 187/2022).
+   💡 Суть простыми словами: (коротко, 1-3 предложения).
+   🏢 Жизненный пример: (конкретная ситуация из жизни многоквартирного дома).
+   🏛 Куда обращаться (если требуется действие): (пошаговый алгоритм: Собрание жильцов / ASP / Cadastru / Primăria / Поставщики услуг / Суд).
+   ⚖️ Основание в законе: точные ссылки на статьи и части Закона № 187/2022.
 
 3. Ключевые нормы Молдовы:
    - Единственная форма управления: Asociație de Proprietari din Condominiu (APC). Все старые формы (ACC, APLP, CCL) подлежат трансформации в APC.
@@ -46,22 +43,23 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     welcome_text = (
-        "👋 **Добро пожаловать!**\n\n"
-        "Я AI-помощник по **Закону о кондоминиуме в Молдове (№ 187/2022)**.\n\n"
-        "💡 **Вы можете спросить меня о чем угодно, например:**\n"
-        "• *Кто должен оплачивать ремонт крыши или замену стояков?*\n"
-        "• *Как зарегистрировать ассоциацию (APC) в ASP?*\n"
-        "• *Как оформить придомовую землю через Примэрию и Кадастр?*\n"
-        "• *Как проголосовать, если собственник находится за границей?*\n\n"
+        "👋 Добро пожаловать!\n\n"
+        "Я AI-помощник по Закону о кондоминиуме в Молдове (№ 187/2022).\n\n"
+        "💡 Вы можете спросить меня о чем угодно, например:\n"
+        "• Кто должен оплачивать ремонт крыши или замену стояков?\n"
+        "• Как зарегистрировать ассоциацию (APC) в ASP?\n"
+        "• Как оформить придомовую землю через Примэрию и Кадастр?\n"
+        "• Как проголосовать, если собственник находится за границей?\n\n"
         "Задайте свой вопрос обычными словами!"
     )
-    await message.answer(welcome_text, parse_mode=ParseMode.MARKDOWN)
+    await message.answer(welcome_text)
 
 @dp.message()
 async def handle_message(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        response = ai_client.models.generate_content(
+        # Асинхронный вызов Gemini API
+        response = await ai_client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=message.text,
             config=genai_types.GenerateContentConfig(
@@ -69,11 +67,14 @@ async def handle_message(message: types.Message):
                 temperature=0.2,
             )
         )
-        await message.answer(response.text, parse_mode=ParseMode.MARKDOWN)
+        if response.text:
+            await message.answer(response.text)
+        else:
+            await message.answer("Ответ пуст. Попробуйте переформулировать вопрос.")
     except Exception as e:
-        logging.error(f"Error handling query: {e}")
+        logging.error(f"Error handling query: {e}", exc_info=True)
         await message.answer(
-            "⚠️ Произошла ошибка при обработке запроса. Пожалуйста, попробуйте сформулировать вопрос иначе."
+            f"⚠️ Ошибка при обращении к API: {e}"
         )
 
 async def main():
