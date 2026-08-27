@@ -60,7 +60,7 @@ async def handle_message(message: types.Message):
     try:
         # Асинхронный вызов Gemini API
         response = await ai_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=message.text,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
