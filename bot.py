@@ -58,9 +58,8 @@ async def cmd_start(message: types.Message):
 async def handle_message(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        # Асинхронный вызов Gemini API
         response = await ai_client.aio.models.generate_content(
-            model="gemini-1.5-flash")
+            model="gemini-2.5-flash",
             contents=message.text,
             config=genai_types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
@@ -73,9 +72,7 @@ async def handle_message(message: types.Message):
             await message.answer("Ответ пуст. Попробуйте переформулировать вопрос.")
     except Exception as e:
         logging.error(f"Error handling query: {e}", exc_info=True)
-        await message.answer(
-            f"⚠️ Ошибка при обращении к API: {e}"
-        )
+        await message.answer(f"⚠️ Ошибка при обращении к API: {e}")
 
 async def main():
     logging.info("Starting Condo Bot...")
