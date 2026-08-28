@@ -23,7 +23,7 @@ if not BOT_TOKEN or not GEMINI_API_KEY:
 
 # Инициализация клиента Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-3.5-flash')
 
 # ==========================================
 # 2. RAG: ЗАГРУЗКА БАЗЫ ЗНАНИЙ ИЗ GOOGLE SHEETS
