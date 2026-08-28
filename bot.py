@@ -146,13 +146,13 @@ async def generate_response_with_rag(user_message: str) -> str:
     """
     
     try:
-        # Для асинхронности оборачиваем вызов в run_in_executor (aiogram так любит больше)
-        response = await asyncio.to_thread(model.generate_content, prompt)
+        # Используем нативный асинхронный метод Gemini
+        response = await model.generate_content_async(prompt)
         return response.text
     except Exception as e:
         logging.error(f"Ошибка Gemini API: {e}")
-        return "Произошла техническая ошибка при обработке запроса. Пожалуйста, попробуйте позже."
-
+        # Теперь бот пришлет саму ошибку прямо вам в Телеграм!
+        return f"Техническая ошибка Gemini API: {e}"
 
 # ==========================================
 # 5. ИНИЦИАЛИЗАЦИЯ AIOGRAM И ХЭНДЛЕРЫ
