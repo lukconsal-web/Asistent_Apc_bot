@@ -25,7 +25,7 @@ if not BOT_TOKEN or not GEMINI_API_KEY:
 
 # Инициализация клиента Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-3.6-flash")
 
 # ==========================================
 # 2. ЗАГРУЗКА PDF ФАЙЛОВ В GEMINI API (БАЗА ЗНАНИЙ)
