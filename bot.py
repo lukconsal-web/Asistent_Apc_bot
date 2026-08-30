@@ -6,6 +6,8 @@ import os
 import re
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+import edge_tts
 import google.generativeai as genai
 import requests
 
@@ -49,14 +51,10 @@ def load_pdf_sources():
       except Exception as e:
         logging.error(f"Ошибка загрузки PDF {filename}: {e}")
     else:
-      logging.warning(
-          f"Файл {filename} не найден в директории бота! Бот продолжит работу"
-          " без него."
-      )
+      logging.warning(f"Файл {filename} не найден в директории бота!")
   return uploaded_files
 
 
-# Загружаем PDF в память API один раз при старте
 PDF_SOURCES = load_pdf_sources()
 
 # ==========================================
@@ -70,8 +68,6 @@ URL_RULES = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTfGJg9HzDpc8OL-hCO
 
 def load_csv_from_url(url):
   """Скачивает CSV по ссылке и возвращает список словарей"""
-  if "ВСТАВЬТЕ_ССЫЛКУ" in url:
-    return []
   try:
     response = requests.get(url, timeout=10)
     response.raise_for_status()
@@ -104,7 +100,6 @@ KNOWLEDGE_BASE = load_knowledge_base()
 # 4. ЛОГИКА ПОИСКА ПО ТАБЛИЦЕ
 # ==========================================
 def search_in_db(query: str, db: dict) -> str:
-  """Ищет ключевые слова пользователя в таблицах и формирует контекст"""
   if not db.get("law") and not db.get("procedures"):
     return "Табличный контекст пуст."
 
@@ -164,31 +159,31 @@ async def generate_response_with_rag(user_message: str) -> str:
   table_context = search_in_db(user_message, KNOWLEDGE_BASE)
 
   system_prompt = f"""
-Ты — Asistent APC, профессиональный и доброжелательный юридический AI-помощник по управлению кондоминиумами (APC) в Республике Молдова (Закон №187/2022, актуальная редакция с изменениями).
+Ты — Asistent APC, профессиональный юридический AI-помощник по управлению кондоминиумами (APC) в Республике Молдова (Закон №187/2022, актуальная редакция с изменениями).
 
-ИСТОЧНИКИ ЗНАНИЙ И ИХ ПРИОРИТЕТ:
-1. Прикрепленный файл "ghid_prezentare_legea_187_2022.pdf" — твой ГЛАВНЫЙ оперативный навигатор. Используй его структуру, схемы действий и матрицу голосования/кворумов.
-2. Прикрепленный файл "condominiu_baza_de_cunostinte.pdf" — полная база знаний по каждой статье и параграфу Закона №187/2022.
+ИСТОЧНИКИ ЗНАНИЙ:
+1. "ghid_prezentare_legea_187_2022.pdf" — твой главный оперативный навигатор.
+2. "condominiu_baza_de_cunostinte.pdf" — полная база знаний по каждой статье и параграфу.
 3. [КОНТЕКСТ ИЗ GOOGLE ТАБЛИЦЫ]:
 {table_context}
 
 ПРАВИЛА ОТВЕТА:
 - Отвечай ВСЕГДА на том же языке, на котором спросил пользователь (Română sau Rusă).
-- Объясняй юридические нормы простыми словами, чтобы понял любой жилец или начинающий администратор.
-- СТРОГО ЗАПРЕЩЕНО выдумывать статьи или искажать кворумы голосования. Все цифры и статьи сверяй с прикрепленными документами.
+- Объясняй юридические нормы доступным языком.
+- СТРОГО ЗАПРЕЩЕНО выдумывать несуществующие статьи. Все цифры и кворумы бери из документов.
 
 ОБЯЗАТЕЛЬНАЯ СТРУКТУРА ОТВЕТА:
 💡 **Суть простыми словами (Esența pe înțelesul tuturor):**
 [Краткий, четкий и понятный ответ на вопрос]
 
 📋 **Пошаговые действия / Кто решает (Pași de urgență / Cine decide):**
-[Кто имеет полномочия и пошаговый алгоритм: Шаг 1, Шаг 2...]
+[Кто имеет полномочия и алгоритм: Шаг 1, Шаг 2...]
 
 ⚠️ **Что ЗАПРЕЩЕНО законом (Ce NU permite legea):**
-[Четкое юридическое предостережение из базы знаний: чего делать нельзя или частая ошибка]
+[Предостережение из базы знаний: чего делать нельзя]
 
 🏢 **Пример из жизни (Exemplu practic):**
-[Реальная ситуация из жизни дома для наглядности]
+[Наглядный пример из жизни дома]
 
 🏛 **Юридическая база (Baza legală):**
 [Точная статья Закона 187/2022 или процедура ASP]
@@ -196,7 +191,6 @@ async def generate_response_with_rag(user_message: str) -> str:
 Вопрос пользователя: {user_message}
 """
 
-  # Собираем все источники: PDF-файлы + текстовый промпт
   request_contents = []
   if PDF_SOURCES:
     request_contents.extend(PDF_SOURCES)
@@ -207,14 +201,51 @@ async def generate_response_with_rag(user_message: str) -> str:
     return response.text
   except Exception as e:
     logging.error(f"Ошибка Gemini API: {e}")
-    return (
-        "Извините, произошла техническая ошибка при обращении к базе знаний."
-        f" ({e})"
-    )
+    return f"Произошла техническая ошибка: ({e})"
 
 
 # ==========================================
-# 6. ИНИЦИАЛИЗАЦИЯ AIOGRAM И ХЭНДЛЕРЫ
+# 6. ОЗВУЧКА ТЕКСТА (NEURAL TTS)
+# ==========================================
+def clean_text_for_voice(text: str) -> str:
+  """Очищает текст от служебных знаков разметки и эмодзи для красивой речи"""
+  text = re.sub(r"[\*#_`]", "", text)
+  text = re.sub(
+      r"[💡📋⚠️🏢🏛📌🔊⏳]", "", text
+  )  # Убираем чтение эмодзи голосом
+  return text.strip()
+
+
+async def generate_voice_audio(text: str) -> bytes:
+  """Генерирует естественную речь с автоопределением языка (RO / RU)"""
+  cleaned = clean_text_for_voice(text)
+
+  # Проверяем наличие кириллицы
+  has_cyrillic = bool(re.search(r"[а-яА-ЯёЁ]", cleaned))
+  # Выбираем естественные голоса
+  voice = "ru-RU-DmitryNeural" if has_cyrillic else "ro-RO-EmilNeural"
+
+  communicate = edge_tts.Communicate(cleaned, voice)
+  audio_buffer = io.BytesIO()
+
+  async for chunk in communicate.stream():
+    if chunk["type"] == "audio":
+      audio_buffer.write(chunk["data"])
+
+  audio_buffer.seek(0)
+  return audio_buffer.read()
+
+
+def get_voice_keyboard() -> InlineKeyboardMarkup:
+  """Создает инлайн-кнопку под ответом"""
+  button = InlineKeyboardButton(
+      text="🔊 Озвучить ответ / Ascultă", callback_data="play_voice"
+  )
+  return InlineKeyboardMarkup(inline_keyboard=[[button]])
+
+
+# ==========================================
+# 7. ХЭНДЛЕРЫ AIOGRAM
 # ==========================================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -237,7 +268,36 @@ async def send_welcome(message: types.Message):
 async def handle_text(message: types.Message):
   processing_msg = await message.reply("⏳ Анализирую базу знаний Закона 187...")
   reply_text = await generate_response_with_rag(message.text)
-  await processing_msg.edit_text(reply_text)
+
+  # Редактируем сообщение и прикрепляем кнопку для озвучки
+  await processing_msg.edit_text(
+      reply_text, reply_markup=get_voice_keyboard()
+  )
+
+
+@dp.callback_query(F.data == "play_voice")
+async def handle_voice_callback(callback: types.CallbackQuery):
+  # Показываем уведомление в Telegram о начале генерации аудио
+  await callback.answer("⏳ Создаю аудиозапись...")
+
+  message_text = callback.message.text
+  if not message_text:
+    await callback.message.answer("Не удалось прочитать текст для озвучки.")
+    return
+
+  try:
+    audio_bytes = await generate_voice_audio(message_text)
+    voice_file = BufferedInputFile(audio_bytes, filename="voice_answer.ogg")
+
+    # Отправляем голосовое сообщение как ответ на вопрос
+    await callback.message.reply_voice(
+        voice=voice_file, caption="🔊 Голосовая версия ответа"
+    )
+  except Exception as e:
+    logging.error(f"Ошибка озвучки: {e}")
+    await callback.message.answer(
+        f"Не удалось сгенерировать голосовое сообщение: {e}"
+    )
 
 
 # ==========================================
