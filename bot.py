@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import time
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,15 +40,29 @@ PDF_FILES = [
 
 
 def load_pdf_sources():
-  """Загружает локальные PDF файлы в Gemini Files API при старте"""
+  """Загружает локальные PDF файлы в Gemini Files API и проверяет статус ACTIVE"""
   uploaded_files = []
   for filename in PDF_FILES:
     if os.path.exists(filename):
       try:
         logging.info(f"Загрузка файла {filename} в Gemini Files API...")
         uploaded = genai.upload_file(filename)
-        uploaded_files.append(uploaded)
-        logging.info(f"Файл {filename} успешно подключен: {uploaded.name}")
+
+        # Ожидание готовности файла (статус ACTIVE)
+        retries = 0
+        while uploaded.state.name == "PROCESSING" and retries < 15:
+          time.sleep(2)
+          uploaded = genai.get_file(uploaded.name)
+          retries += 1
+
+        if uploaded.state.name == "ACTIVE":
+          uploaded_files.append(uploaded)
+          logging.info(f"Файл {filename} готов: {uploaded.name}")
+        else:
+          logging.warning(
+              f"Файл {filename} в статусе {uploaded.state.name}, продолжаем без"
+              " него"
+          )
       except Exception as e:
         logging.error(f"Ошибка загрузки PDF {filename}: {e}")
     else:
@@ -67,7 +82,6 @@ URL_RULES = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTfGJg9HzDpc8OL-hCO
 
 
 def load_csv_from_url(url):
-  """Скачивает CSV по ссылке и возвращает список словарей"""
   try:
     response = requests.get(url, timeout=10)
     response.raise_for_status()
@@ -76,12 +90,11 @@ def load_csv_from_url(url):
     reader = csv.DictReader(csv_data)
     return list(reader)
   except Exception as e:
-    logging.error(f"Ошибка загрузки {url}: {e}")
+    logging.error(f"Ошибка загрузки CSV {url}: {e}")
     return []
 
 
 def load_knowledge_base():
-  """Загружает все листы Google Sheets в память сервера"""
   logging.info("Загрузка базы знаний из Google Sheets...")
   db = {
       "law": load_csv_from_url(URL_LAW),
@@ -115,7 +128,7 @@ def search_in_db(query: str, db: dict) -> str:
     row_text = " ".join(str(val).lower() for val in row_dict.values() if val)
     return sum(1 for kw in keywords if kw in row_text)
 
-  # ПОИСК: ЗАКОН
+  # Поиск по статьям
   law_matches = []
   for row in db.get("law", []):
     score = count_matches(row)
@@ -130,7 +143,7 @@ def search_in_db(query: str, db: dict) -> str:
         f" {row.get('Life example', '')}"
     )
 
-  # ПОИСК: ПРОЦЕДУРЫ
+  # Поиск по процедурам
   proc_matches = []
   for row in db.get("procedures", []):
     score = count_matches(row)
@@ -163,30 +176,30 @@ async def generate_response_with_rag(user_message: str) -> str:
 
 ИСТОЧНИКИ ЗНАНИЙ:
 1. "ghid_prezentare_legea_187_2022.pdf" — твой главный оперативный навигатор.
-2. "condominiu_baza_de_cunostinte.pdf" — полная база знаний по каждой статье и параграфу.
+2. "condominiu_baza_de_cunostinte.pdf" — полная база знаний по статьям и параграфам.
 3. [КОНТЕКСТ ИЗ GOOGLE ТАБЛИЦЫ]:
 {table_context}
 
 ПРАВИЛА ОТВЕТА:
 - Отвечай ВСЕГДА на том же языке, на котором спросил пользователь (Română sau Rusă).
 - Объясняй юридические нормы доступным языком.
-- СТРОГО ЗАПРЕЩЕНО выдумывать несуществующие статьи. Все цифры и кворумы бери из документов.
+- СТРОГО ЗАПРЕЩЕНО выдумывать статьи или менять установленные законом кворумы.
 
 ОБЯЗАТЕЛЬНАЯ СТРУКТУРА ОТВЕТА:
 💡 **Суть простыми словами (Esența pe înțelesul tuturor):**
 [Краткий, четкий и понятный ответ на вопрос]
 
 📋 **Пошаговые действия / Кто решает (Pași de urgență / Cine decide):**
-[Кто имеет полномочия и алгоритм: Шаг 1, Шаг 2...]
+[Кто уполномочен и пошаговый алгоритм: Шаг 1, Шаг 2...]
 
 ⚠️ **Что ЗАПРЕЩЕНО законом (Ce NU permite legea):**
-[Предостережение из базы знаний: чего делать нельзя]
+[Предостережение из базы знаний: чего делать нельзя или частая ошибка]
 
 🏢 **Пример из жизни (Exemplu practic):**
-[Наглядный пример из жизни дома]
+[Наглядная ситуация из жизни дома]
 
 🏛 **Юридическая база (Baza legală):**
-[Точная статья Закона 187/2022 или процедура ASP]
+[Точная статья Закона 187/2022 или процедура ASP/Кадастра]
 
 Вопрос пользователя: {user_message}
 """
@@ -200,29 +213,32 @@ async def generate_response_with_rag(user_message: str) -> str:
     response = await model.generate_content_async(request_contents)
     return response.text
   except Exception as e:
-    logging.error(f"Ошибка Gemini API: {e}")
-    return f"Произошла техническая ошибка: ({e})"
+    logging.error(f"Ошибка Gemini API с файлами: {e}, резервный запрос...")
+    try:
+      # Резервный запрос без файлов, если файл устарел или возник сбой
+      fallback_resp = await model.generate_content_async(system_prompt)
+      return fallback_resp.text
+    except Exception as e2:
+      logging.error(f"Критическая ошибка Gemini API: {e2}")
+      return f"Произошла техническая ошибка: ({e2})"
 
 
 # ==========================================
 # 6. ОЗВУЧКА ТЕКСТА (NEURAL TTS)
 # ==========================================
 def clean_text_for_voice(text: str) -> str:
-  """Очищает текст от служебных знаков разметки и эмодзи для красивой речи"""
   text = re.sub(r"[\*#_`]", "", text)
-  text = re.sub(
-      r"[💡📋⚠️🏢🏛📌🔊⏳]", "", text
-  )  # Убираем чтение эмодзи голосом
+  text = re.sub(r"[💡📋⚠️🏢🏛📌🔊⏳]", "", text)
   return text.strip()
 
 
 async def generate_voice_audio(text: str) -> bytes:
-  """Генерирует естественную речь с автоопределением языка (RO / RU)"""
   cleaned = clean_text_for_voice(text)
+  # Берем первые 2500 символов для комфортной длины аудиосообщения
+  if len(cleaned) > 2500:
+    cleaned = cleaned[:2500] + "..."
 
-  # Проверяем наличие кириллицы
   has_cyrillic = bool(re.search(r"[а-яА-ЯёЁ]", cleaned))
-  # Выбираем естественные голоса
   voice = "ru-RU-DmitryNeural" if has_cyrillic else "ro-RO-EmilNeural"
 
   communicate = edge_tts.Communicate(cleaned, voice)
@@ -237,11 +253,24 @@ async def generate_voice_audio(text: str) -> bytes:
 
 
 def get_voice_keyboard() -> InlineKeyboardMarkup:
-  """Создает инлайн-кнопку под ответом"""
   button = InlineKeyboardButton(
       text="🔊 Озвучить ответ / Ascultă", callback_data="play_voice"
   )
   return InlineKeyboardMarkup(inline_keyboard=[[button]])
+
+
+def split_message(text: str, max_len: int = 3800) -> list:
+  """Разбивает текст на части по переносам строк, не превышая лимит Telegram"""
+  chunks = []
+  while len(text) > max_len:
+    split_idx = text.rfind("\n", 0, max_len)
+    if split_idx == -1:
+      split_idx = max_len
+    chunks.append(text[:split_idx].strip())
+    text = text[split_idx:].strip()
+  if text:
+    chunks.append(text)
+  return chunks
 
 
 # ==========================================
@@ -267,17 +296,36 @@ async def send_welcome(message: types.Message):
 @dp.message(F.text)
 async def handle_text(message: types.Message):
   processing_msg = await message.reply("⏳ Анализирую базу знаний Закона 187...")
-  reply_text = await generate_response_with_rag(message.text)
 
-  # Редактируем сообщение и прикрепляем кнопку для озвучки
-  await processing_msg.edit_text(
-      reply_text, reply_markup=get_voice_keyboard()
-  )
+  try:
+    reply_text = await generate_response_with_rag(message.text)
+    chunks = split_message(reply_text)
+
+    # Если ответ уместился в одно сообщение:
+    if len(chunks) == 1:
+      await processing_msg.edit_text(
+          chunks[0], reply_markup=get_voice_keyboard()
+      )
+    else:
+      # Если ответ длинный: редактируем первое сообщение, а остальные отправляем следом
+      await processing_msg.edit_text(chunks[0])
+      for i, chunk in enumerate(chunks[1:]):
+        # Кнопку озвучки вешаем на последнее сообщение
+        keyboard = (
+            get_voice_keyboard() if i == len(chunks[1:]) - 1 else None
+        )
+        await message.answer(chunk, reply_markup=keyboard)
+
+  except Exception as e:
+    logging.error(f"Ошибка при обработке и отправке сообщения: {e}")
+    try:
+      await processing_msg.edit_text(f"⚠️ Ошибка при отправке ответа: {e}")
+    except Exception:
+      pass
 
 
 @dp.callback_query(F.data == "play_voice")
 async def handle_voice_callback(callback: types.CallbackQuery):
-  # Показываем уведомление в Telegram о начале генерации аудио
   await callback.answer("⏳ Создаю аудиозапись...")
 
   message_text = callback.message.text
@@ -289,15 +337,12 @@ async def handle_voice_callback(callback: types.CallbackQuery):
     audio_bytes = await generate_voice_audio(message_text)
     voice_file = BufferedInputFile(audio_bytes, filename="voice_answer.ogg")
 
-    # Отправляем голосовое сообщение как ответ на вопрос
     await callback.message.reply_voice(
         voice=voice_file, caption="🔊 Голосовая версия ответа"
     )
   except Exception as e:
     logging.error(f"Ошибка озвучки: {e}")
-    await callback.message.answer(
-        f"Не удалось сгенерировать голосовое сообщение: {e}"
-    )
+    await callback.message.answer(f"Не удалось сгенерировать аудио: {e}")
 
 
 # ==========================================
