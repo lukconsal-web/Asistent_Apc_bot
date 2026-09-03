@@ -12,7 +12,6 @@ import edge_tts
 import google.generativeai as genai
 import requests
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 
 # ==========================================
@@ -26,12 +25,13 @@ if not BOT_TOKEN or not GEMINI_API_KEY:
       "Не найдены переменные окружения BOT_TOKEN или GEMINI_API_KEY!"
   )
 
-# Инициализация клиента Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-3.6-flash")
+
+# Список моделей: основная с лимитом 1500 запр/день + резервные
+MODELS_CASCADE = ["gemini-3.5-flash", "gemini-2.5-flash-lite"]
 
 # ==========================================
-# 2. ЗАГРУЗКА PDF ФАЙЛОВ В GEMINI API (БАЗА ЗНАНИЙ)
+# 2. ЗАГРУЗКА PDF ФАЙЛОВ В GEMINI API
 # ==========================================
 PDF_FILES = [
     "ghid_prezentare_legea_187_2022.pdf",
@@ -40,7 +40,6 @@ PDF_FILES = [
 
 
 def load_pdf_sources():
-  """Загружает локальные PDF файлы в Gemini Files API и проверяет статус ACTIVE"""
   uploaded_files = []
   for filename in PDF_FILES:
     if os.path.exists(filename):
@@ -48,7 +47,6 @@ def load_pdf_sources():
         logging.info(f"Загрузка файла {filename} в Gemini Files API...")
         uploaded = genai.upload_file(filename)
 
-        # Ожидание готовности файла (статус ACTIVE)
         retries = 0
         while uploaded.state.name == "PROCESSING" and retries < 15:
           time.sleep(2)
@@ -59,21 +57,18 @@ def load_pdf_sources():
           uploaded_files.append(uploaded)
           logging.info(f"Файл {filename} готов: {uploaded.name}")
         else:
-          logging.warning(
-              f"Файл {filename} в статусе {uploaded.state.name}, продолжаем без"
-              " него"
-          )
+          logging.warning(f"Файл {filename} пропущен (статус не ACTIVE).")
       except Exception as e:
         logging.error(f"Ошибка загрузки PDF {filename}: {e}")
     else:
-      logging.warning(f"Файл {filename} не найден в директории бота!")
+      logging.warning(f"Файл {filename} не найден в каталоге!")
   return uploaded_files
 
 
 PDF_SOURCES = load_pdf_sources()
 
 # ==========================================
-# 3. RAG: ЗАГРУЗКА ДАННЫХ ИЗ GOOGLE SHEETS
+# 3. RAG: GOOGLE SHEETS
 # ==========================================
 URL_LAW = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTfGJg9HzDpc8OL-hCOl64FpZqsri3cePqidISr_SyyhBuLTr0xydZTwzQEu1-jU7xeQT_G3PQ3ksMX/pub?gid=2095782869&single=true&output=csv"
 URL_PROCEDURES = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTfGJg9HzDpc8OL-hCOl64FpZqsri3cePqidISr_SyyhBuLTr0xydZTwzQEu1-jU7xeQT_G3PQ3ksMX/pub?gid=48566074&single=true&output=csv"
@@ -87,8 +82,7 @@ def load_csv_from_url(url):
     response.raise_for_status()
     response.encoding = "utf-8"
     csv_data = io.StringIO(response.text)
-    reader = csv.DictReader(csv_data)
-    return list(reader)
+    return list(csv.DictReader(csv_data))
   except Exception as e:
     logging.error(f"Ошибка загрузки CSV {url}: {e}")
     return []
@@ -96,21 +90,19 @@ def load_csv_from_url(url):
 
 def load_knowledge_base():
   logging.info("Загрузка базы знаний из Google Sheets...")
-  db = {
+  return {
       "law": load_csv_from_url(URL_LAW),
       "procedures": load_csv_from_url(URL_PROCEDURES),
       "sources": load_csv_from_url(URL_SOURCES),
       "rules": load_csv_from_url(URL_RULES),
   }
-  logging.info("Google Sheets база знаний загружена!")
-  return db
 
 
 KNOWLEDGE_BASE = load_knowledge_base()
 
 
 # ==========================================
-# 4. ЛОГИКА ПОИСКА ПО ТАБЛИЦЕ
+# 4. ПОИСК ПО ТАБЛИЦЕ
 # ==========================================
 def search_in_db(query: str, db: dict) -> str:
   if not db.get("law") and not db.get("procedures"):
@@ -118,7 +110,6 @@ def search_in_db(query: str, db: dict) -> str:
 
   clean_query = re.sub(r"[^\w\s]", "", query).lower()
   keywords = [word for word in clean_query.split() if len(word) > 3]
-
   if not keywords:
     return "Общий запрос."
 
@@ -128,45 +119,41 @@ def search_in_db(query: str, db: dict) -> str:
     row_text = " ".join(str(val).lower() for val in row_dict.values() if val)
     return sum(1 for kw in keywords if kw in row_text)
 
-  # Поиск по статьям
   law_matches = []
   for row in db.get("law", []):
     score = count_matches(row)
     if score > 0:
       law_matches.append((score, row))
-
   law_matches.sort(key=lambda x: x[0], reverse=True)
   for _, row in law_matches[:3]:
     context_fragments.append(
-        f"[ЗАКОН ИЗ ТАБЛИЦЫ] Статья: {row.get('Article', '')}. Суть:"
+        f"[ЗАКОН] Статья: {row.get('Article', '')}. Суть:"
         f" {row.get('Simple explanation', '')}. Пример:"
         f" {row.get('Life example', '')}"
     )
 
-  # Поиск по процедурам
   proc_matches = []
   for row in db.get("procedures", []):
     score = count_matches(row)
     if score > 0:
       proc_matches.append((score, row))
-
   proc_matches.sort(key=lambda x: x[0], reverse=True)
   for _, row in proc_matches[:2]:
     context_fragments.append(
-        f"[ПРОЦЕДУРА ИЗ ТАБЛИЦЫ] Ситуация: {row.get('Situation', '')}. Что"
-        f" делать: {row.get('What to do', '')}. Документы:"
-        f" {row.get('Documents', '')}. Учреждение:"
-        f" {row.get('Institution', '')}"
+        f"[ПРОЦЕДУРА] Ситуация: {row.get('Situation', '')}. Действия:"
+        f" {row.get('What to do', '')}. Документы:"
+        f" {row.get('Documents', '')}. Орган: {row.get('Institution', '')}"
     )
 
-  if not context_fragments:
-    return "В таблице прямых совпадений не найдено."
-
-  return "\n\n".join(context_fragments)
+  return (
+      "\n\n".join(context_fragments)
+      if context_fragments
+      else "В таблице прямых совпадений не найдено."
+  )
 
 
 # ==========================================
-# 5. ФОРМИРОВАНИЕ ОТВЕТА GEMINI
+# 5. ГЕНЕРАЦИЯ ОТВЕТА С КАСКАДОМ МОДЕЛЕЙ
 # ==========================================
 async def generate_response_with_rag(user_message: str) -> str:
   table_context = search_in_db(user_message, KNOWLEDGE_BASE)
@@ -183,9 +170,9 @@ async def generate_response_with_rag(user_message: str) -> str:
 ПРАВИЛА ОТВЕТА:
 - Отвечай ВСЕГДА на том же языке, на котором спросил пользователь (Română sau Rusă).
 - Объясняй юридические нормы доступным языком.
-- СТРОГО ЗАПРЕЩЕНО выдумывать статьи или менять установленные законом кворумы.
+- СТРОГО ЗАПРЕЩЕНО выдумывать несуществующие статьи. Все цифры и кворумы сверяй с документами.
 
-ОБЯЗАТЕЛЬНАЯ СТРУКТУРА ОТВЕТА:
+ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:
 💡 **Суть простыми словами (Esența pe înțelesul tuturor):**
 [Краткий, четкий и понятный ответ на вопрос]
 
@@ -196,7 +183,7 @@ async def generate_response_with_rag(user_message: str) -> str:
 [Предостережение из базы знаний: чего делать нельзя или частая ошибка]
 
 🏢 **Пример из жизни (Exemplu practic):**
-[Наглядная ситуация из жизни дома]
+[Наглядная ситуация из жизни многоквартирного дома]
 
 🏛 **Юридическая база (Baza legală):**
 [Точная статья Закона 187/2022 или процедура ASP/Кадастра]
@@ -209,22 +196,36 @@ async def generate_response_with_rag(user_message: str) -> str:
     request_contents.extend(PDF_SOURCES)
   request_contents.append(system_prompt)
 
-  try:
-    response = await model.generate_content_async(request_contents)
-    return response.text
-  except Exception as e:
-    logging.error(f"Ошибка Gemini API с файлами: {e}, резервный запрос...")
+  # Каскадный опрос моделей: сначала 3.5-flash (1500 запр/день), если перегружена — 2.5-flash-lite
+  last_error = None
+  for model_name in MODELS_CASCADE:
     try:
-      # Резервный запрос без файлов, если файл устарел или возник сбой
-      fallback_resp = await model.generate_content_async(system_prompt)
-      return fallback_resp.text
-    except Exception as e2:
-      logging.error(f"Критическая ошибка Gemini API: {e2}")
-      return f"Произошла техническая ошибка: ({e2})"
+      current_model = genai.GenerativeModel(model_name)
+      response = await current_model.generate_content_async(request_contents)
+      return response.text
+    except Exception as e:
+      logging.warning(
+          f"Модель {model_name} вернула ошибку: {e}. Пробуем резервную..."
+      )
+      last_error = e
+      await asyncio.sleep(1)
+
+  # Если обе модели с PDF перегружены — пробуем легкий текстовый запрос
+  try:
+    fallback_model = genai.GenerativeModel("gemini-3.5-flash")
+    resp = await fallback_model.generate_content_async(system_prompt)
+    return resp.text
+  except Exception:
+    pass
+
+  return (
+      "⚠️ Сервер базы знаний временно перегружен запросами. Пожалуйста,"
+      " повторите ваш вопрос через 30–40 секунд."
+  )
 
 
 # ==========================================
-# 6. ОЗВУЧКА ТЕКСТА (NEURAL TTS)
+# 6. ОЗВУЧКА ТЕКСТА
 # ==========================================
 def clean_text_for_voice(text: str) -> str:
   text = re.sub(r"[\*#_`]", "", text)
@@ -234,7 +235,6 @@ def clean_text_for_voice(text: str) -> str:
 
 async def generate_voice_audio(text: str) -> bytes:
   cleaned = clean_text_for_voice(text)
-  # Берем первые 2500 символов для комфортной длины аудиосообщения
   if len(cleaned) > 2500:
     cleaned = cleaned[:2500] + "..."
 
@@ -243,7 +243,6 @@ async def generate_voice_audio(text: str) -> bytes:
 
   communicate = edge_tts.Communicate(cleaned, voice)
   audio_buffer = io.BytesIO()
-
   async for chunk in communicate.stream():
     if chunk["type"] == "audio":
       audio_buffer.write(chunk["data"])
@@ -253,14 +252,16 @@ async def generate_voice_audio(text: str) -> bytes:
 
 
 def get_voice_keyboard() -> InlineKeyboardMarkup:
-  button = InlineKeyboardButton(
-      text="🔊 Озвучить ответ / Ascultă", callback_data="play_voice"
+  return InlineKeyboardMarkup(
+      inline_keyboard=[[
+          InlineKeyboardButton(
+              text="🔊 Озвучить ответ / Ascultă", callback_data="play_voice"
+          )
+      ]]
   )
-  return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 def split_message(text: str, max_len: int = 3800) -> list:
-  """Разбивает текст на части по переносам строк, не превышая лимит Telegram"""
   chunks = []
   while len(text) > max_len:
     split_idx = text.rfind("\n", 0, max_len)
@@ -274,7 +275,7 @@ def split_message(text: str, max_len: int = 3800) -> list:
 
 
 # ==========================================
-# 7. ХЭНДЛЕРЫ AIOGRAM
+# 7. ХЭНДЛЕРЫ
 # ==========================================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -301,25 +302,21 @@ async def handle_text(message: types.Message):
     reply_text = await generate_response_with_rag(message.text)
     chunks = split_message(reply_text)
 
-    # Если ответ уместился в одно сообщение:
     if len(chunks) == 1:
       await processing_msg.edit_text(
           chunks[0], reply_markup=get_voice_keyboard()
       )
     else:
-      # Если ответ длинный: редактируем первое сообщение, а остальные отправляем следом
       await processing_msg.edit_text(chunks[0])
       for i, chunk in enumerate(chunks[1:]):
-        # Кнопку озвучки вешаем на последнее сообщение
-        keyboard = (
-            get_voice_keyboard() if i == len(chunks[1:]) - 1 else None
-        )
+        keyboard = get_voice_keyboard() if i == len(chunks[1:]) - 1 else None
         await message.answer(chunk, reply_markup=keyboard)
-
   except Exception as e:
-    logging.error(f"Ошибка при обработке и отправке сообщения: {e}")
+    logging.error(f"Ошибка отправки: {e}")
     try:
-      await processing_msg.edit_text(f"⚠️ Ошибка при отправке ответа: {e}")
+      await processing_msg.edit_text(
+          "⚠️ Не удалось отправить сообщение. Попробуйте еще раз."
+      )
     except Exception:
       pass
 
@@ -327,16 +324,13 @@ async def handle_text(message: types.Message):
 @dp.callback_query(F.data == "play_voice")
 async def handle_voice_callback(callback: types.CallbackQuery):
   await callback.answer("⏳ Создаю аудиозапись...")
-
   message_text = callback.message.text
   if not message_text:
-    await callback.message.answer("Не удалось прочитать текст для озвучки.")
     return
 
   try:
     audio_bytes = await generate_voice_audio(message_text)
     voice_file = BufferedInputFile(audio_bytes, filename="voice_answer.ogg")
-
     await callback.message.reply_voice(
         voice=voice_file, caption="🔊 Голосовая версия ответа"
     )
@@ -346,7 +340,7 @@ async def handle_voice_callback(callback: types.CallbackQuery):
 
 
 # ==========================================
-# ЗАПУСК БОТА
+# ЗАПУСК
 # ==========================================
 async def main():
   logging.info("Запуск бота Asistent APC...")
